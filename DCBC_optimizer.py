@@ -13,7 +13,7 @@ import nibabel as nb
 from helper_function import compute_similarity, smoothing, generate
 
 from eval_DCBC import DCBC, compute_var_cov
-from scipy.io import savemat
+from scipy.io import savemat, loadmat
 import scipy.io as spio
 import scipy as sp
 from scipy.spatial import SphericalVoronoi
@@ -127,11 +127,12 @@ def compute_neighbouring(file):
     return neigh
 
 
-def vertex_dcbc(parcels, neigh_matrix, connectivity, dist_file=None, kernel=1):
+def vertex_dcbc(parcels, neigh_matrix, connectivity, dist=None,
+                kernel=60, bin=10, func=None):
     boundaries = []
     new_parcel = np.copy(parcels)
-    mat = spio.loadmat(dist_file)
-    dist = mat['distGOD']
+    cor = np.corrcoef(func)
+    numBins = int(np.floor(kernel / bin))
 
     # Find the vertices index at the boundaries
     for v in range(parcels.shape[0]):
@@ -144,49 +145,55 @@ def vertex_dcbc(parcels, neigh_matrix, connectivity, dist_file=None, kernel=1):
     for v in boundaries:  # main loop of iterating all vertices at boundaries
         connecting = np.where(neigh_matrix[v] == 1)  # Check all neighbouring vertices
         neighbours = np.where(dist[v] <= kernel)
+        v_idx = np.where(neighbours[0] == v)
+
+        # Making subset of dist, parcels, and func matrix within current radius
+        this_dist = dist[:,neighbours[0]]
+        this_dist = this_dist[neighbours[0],:]
+        this_parcels = parcels[neighbours]
+        this_func = func[neighbours]
+
+
+
+        T = compute_DCBC(maxDist=kernel, binWidth=bin, dist=this_dist,
+                         parcellation=this_parcels, func=this_func)
+
+        curr_dcbc = T['DCBC']
 
         # Only check for the boundaries vertices
         within_connecting, between_connecting = split_neighbours(parcels, v, np.asarray(connecting).flatten())
-        within_neighbours, between_neighbours = split_neighbours(parcels, v, np.asarray(neighbours).flatten())
-        if not np.size(within_connecting):
-            # if this node has no neighbouring vertices with same label
-            # parcels[v] = np.bincount(parcels[within_neighbours]).argmax()
-            max_r = -2
-        else:
-            max_r = np.mean(connectivity[v][within_neighbours])  # presume the max correlation is within R
 
         for par in np.unique(parcels[between_connecting]):
-            this_nb = np.extract(np.equal(parcels[between_neighbours], par), between_neighbours)
-            this_r_between = np.mean(connectivity[v][this_nb])
-            if this_r_between > max_r:
+            # Change this vertex's label to each of the connecting parcel
+            changed_parcels = np.copy(this_parcels)
+            changed_parcels[v_idx] = par
+            this_T = compute_DCBC(maxDist=kernel, binWidth=bin, dist=this_dist,
+                         parcellation=changed_parcels, func=this_func)
+            this_dcbc = this_T['DCBC']
+            if this_dcbc > curr_dcbc:
                 new_parcel[v] = par
-                max_r = this_r_between
+                curr_dcbc = this_dcbc
 
-    # for v in range(parcels.shape[0]):  # main loop of iterating all vertices
-    #     neighbours = np.where(neigh_matrix[v] == 1)  # Check all neighbouring vertices
-    #
-    #     if check_boundaries(parcels[v], parcels[neighbours]):
-    #         # Only check for the boundaries vertices
-    #         within_neighbours, between_neighbours = split_neighbours(parcels, v, np.asarray(neighbours).flatten())
-    #         if not np.size(within_neighbours):
-    #             # if this node has no neighbouring vertices with same label
-    #             # parcels[v] = np.bincount(parcels[within_neighbours]).argmax()
-    #             max_r = -2
-    #         else:
-    #             max_r = np.mean(connectivity[v][within_neighbours])  # presume the max correlation is within R
-    #
-    #         for par in np.unique(parcels[between_neighbours]):
-    #             this_nb = np.extract(np.equal(parcels[between_neighbours], par), between_neighbours)
-    #             this_r_between = np.mean(connectivity[v][this_nb])
-    #             if this_r_between > max_r:
-    #                 parcels[v] = par
-    #                 max_r = this_r_between
+        # within_neighbours, between_neighbours = split_neighbours(parcels, v, np.asarray(neighbours).flatten())
+        # if not np.size(within_connecting):
+        #     # if this node has no neighbouring vertices with same label
+        #     # parcels[v] = np.bincount(parcels[within_neighbours]).argmax()
+        #     max_r = -2
+        # else:
+        #     max_r = np.mean(connectivity[v][within_neighbours])  # presume the max correlation is within R
+        #
+        # for par in np.unique(parcels[between_connecting]):
+        #     this_nb = np.extract(np.equal(parcels[between_neighbours], par), between_neighbours)
+        #     this_r_between = np.mean(connectivity[v][this_nb])
+        #     if this_r_between > max_r:
+        #         new_parcel[v] = par
+        #         max_r = this_r_between
 
     return new_parcel
 
 
 def compute_DCBC(maxDist=35, binWidth=1, parcellation=np.empty([]),
-                 func_file=None, dist_file=None, weighting=True):
+                 func=None, dist=None, weighting=True):
     """
     Constructor of DCBC class
     :param hems:        Hemisphere to test. 'L' - left hemisphere; 'R' - right hemisphere; 'all' - both hemispheres
@@ -201,13 +208,8 @@ def compute_DCBC(maxDist=35, binWidth=1, parcellation=np.empty([]),
 
     numBins = int(np.floor(maxDist / binWidth))
 
-    mat = spio.loadmat(dist_file)
-    dist = mat['distGOD']
-    func = nb.load(func_file)
-    wbeta_data = [x.data for x in func.darrays]
-    wbeta = np.reshape(wbeta_data, (len(wbeta_data), len(wbeta_data[0])))
-    data = wbeta.transpose()
-    cov, var = compute_var_cov(data)
+    cov, var = compute_var_cov(func)
+    cor = np.corrcoef(func)
 
     # remove the nan value and medial wall from dist file
     row, col, distance = sp.sparse.find(dist)
@@ -227,8 +229,12 @@ def compute_DCBC(maxDist=35, binWidth=1, parcellation=np.empty([]),
         num_between = np.append(num_between, between.shape[0])
 
         # Compute and append averaged within- and between-parcel correlations in current bin
-        this_corr_within = np.nanmean(cov[row[inBin[within]], col[inBin[within]]]) / np.nanmean(var[row[inBin[within]], col[inBin[within]]])
-        this_corr_between = np.nanmean(cov[row[inBin[between]], col[inBin[between]]]) / np.nanmean(var[row[inBin[between]], col[inBin[between]]])
+        # this_corr_within = np.nanmean(cov[row[inBin[within]], col[inBin[within]]]) / np.nanmean(var[row[inBin[within]], col[inBin[within]]])
+        # this_corr_between = np.nanmean(cov[row[inBin[between]], col[inBin[between]]]) / np.nanmean(var[row[inBin[between]], col[inBin[between]]])
+
+        this_corr_within = np.nanmean(cor[row[inBin[within]], col[inBin[within]]])
+        this_corr_between = np.nanmean(cor[row[inBin[between]], col[inBin[between]]])
+
         corr_within = np.append(corr_within, this_corr_within)
         corr_between = np.append(corr_between, this_corr_between)
 
@@ -253,7 +259,6 @@ def compute_DCBC(maxDist=35, binWidth=1, parcellation=np.empty([]),
         "DCBC": DCBC
     }
 
-    print('\n Done evaluation.')
     return D
 
 
@@ -261,7 +266,8 @@ if __name__ == "__main__":
     print('Start DCBC optimizing on simulation ...')
 
     surf = 'simulation/Sphere.6k.L.surf.gii'
-    dist = "distSphere_6k.mat"
+    dist = spio.loadmat("simulation/distSphere_6k.mat")
+    dist = dist['distGOD']
     random_func_file = 'simulation/test_boundaries.func.gii'
     smoothed_func_file = 'simulation/test_boundaries_smoothed.func.gii'
     # the destination boundaries
@@ -270,41 +276,47 @@ if __name__ == "__main__":
     # Making functional map with estimate boundaries and smoothing
     estimate_func = generate.generate_random_map(num_nodes=boundary.shape[0], num_con=34,
                                                  outfile_name=random_func_file, parcel=boundary,
-                                                 boundaries=True, num_iter=3)
+                                                 boundaries=True, num_iter=4)
     smoothing.smooth(file=random_func_file, base_surf=surf,
                      outfile_name=smoothed_func_file, kernel=5)
     estimate_func_smoothed = load_funcgii(smoothed_func_file)
 
     # Start optimizing from random Icosahedron to destination parcellation
-    parcels = load_labelgii('simulation/test_Icosahedron-42.6k.L.label.gii')
     neigh = compute_neighbouring(surf)
     r = compute_similarity.compute_similarity(files=smoothed_func_file,
                                               type='pearson', dense=False)
 
-    original = compute_DCBC(maxDist=80, binWidth=5, dist_file=dist,
-                            parcellation=parcels, func_file=random_func_file)
+    rotations = loadmat('simulation/Icos_rotation.mat')['icos']
+    dcbc = np.empty((4,))
+    for i in range(10):
+        parcels = rotations[:, i]
+        # parcels = load_labelgii('simulation/test_Icosahedron-42.6k.L.label.gii')
+        original = compute_DCBC(maxDist=60, binWidth=10, dist=dist,
+                                parcellation=parcels, func=estimate_func)
 
-    global_dcbc = np.empty([24, 1])
-    for k in range(100):  # Main loop
-        print("Fine-tuning the DCBC optimization, iter #", k)
-        parcels = vertex_dcbc(parcels=parcels, neigh_matrix=neigh, connectivity=r, dist_file=dist, kernel=25)
+        global_dcbc = original['DCBC']
+        fine_tune_parcels = np.empty((parcels.shape[0],))
+        for k in range(15):  # Main loop
+            print("Fine-tuning the DCBC optimization, iter #", k)
+            parcels = vertex_dcbc(parcels=parcels, neigh_matrix=neigh, connectivity=r,
+                                  dist=dist, kernel=60, bin=10, func=estimate_func)
 
-        if (k+1) % 100 == 0:
-            # Create a DCBC evaluation object of the desired evaluation parameters(left hemisphere)
-            T = compute_DCBC(maxDist=80, binWidth=5, dist_file=dist, parcellation=parcels,func_file='simulation_6k_smooth.func.gii')
+            if (k+1) % 5 == 0:
+                # Create a DCBC evaluation object of the desired evaluation parameters(left hemisphere)
+                T = compute_DCBC(maxDist=60, binWidth=10, dist=dist, parcellation=parcels, func=estimate_func)
+                global_dcbc = np.hstack((global_dcbc, T['DCBC']))
+                fine_tune_parcels = np.vstack((fine_tune_parcels, parcels))
 
-            dcbc = np.empty([])
-            data = [value for key, value in T.items()]
-            for i in range(len(data)):
-                this_DCBC = data[i]['DCBC']
-                dcbc = np.vstack((dcbc, this_DCBC))
+        dcbc = np.vstack((dcbc, global_dcbc))
 
-            dcbc = np.delete(dcbc, 0, axis=0)
-            global_dcbc = np.hstack((global_dcbc, dcbc))
+        fine_tune_parcels = np.delete(fine_tune_parcels, 0, axis=0)
+        fine_tune_parcels = fine_tune_parcels.transpose()
+        outfile_name = "parcel_fineTune_iter_%d.mat" % i
+        pdic = {"parcels": fine_tune_parcels}
+        savemat(outfile_name, pdic)
 
-    global_dcbc = np.delete(global_dcbc, 0, axis=1)
-
-    mdic = {"dcbc": global_dcbc}
-    savemat("dcbc_finTune_50_yeo7.mat", mdic)
-    print(parcels)
+    dcbc = np.delete(dcbc, 0, axis=0)
+    mdic = {"dcbc": dcbc}
+    savemat("dcbc_finTune_10_random.mat", mdic)
+    print("END..")
 

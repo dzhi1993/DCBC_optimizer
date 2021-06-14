@@ -9,7 +9,7 @@ Author: dzhi
 '''
 import numpy as np
 import nibabel as nb
-
+import matplotlib.pyplot as plt
 import os
 
 
@@ -44,6 +44,55 @@ def makeFuncGifti(data, anatomicalStruct='CortexLeft', columnNames=[]):
 
     S = nb.gifti.GiftiImage(meta=C, darrays=D)
     S.labeltable.labels.append(E)
+
+    return S
+
+
+def makeLabelGifti(data,anatomicalStruct='CortexLeft',labelNames=[],columnNames=[],labelRGBA=[]):
+
+    Q = data.shape[0]
+    numLabels = len(np.unique(data))
+
+    # Create naming and coloring if not specified in varargin
+    # Make columnNames if empty
+    if len(columnNames) == 0:
+        for i in range(numLabels):
+            columnNames.append("col_{:02d}".format(i+1))
+
+    # Determine color scale if empty
+    if len(labelRGBA) == 0:
+      hsv = plt.cm.get_cmap('hsv',numLabels)
+      color = hsv(np.linspace(0,1,numLabels))
+      # Shuffle the order so that colors are more visible
+      color = color[np.random.permutation(numLabels)]
+      labelRGBA = np.zeros([numLabels,4])
+      for i in range(numLabels):
+          labelRGBA[i] = color[i]
+
+    # Create label names
+    if len(labelNames) == 0:
+      for i in range(numLabels):
+        labelNames.append("label-{:02d}".format(i+1))
+
+    # Create label.gii structure
+    C = nb.gifti.GiftiMetaData.from_dict({
+      'AnatomicalStructurePrimary': anatomicalStruct,
+      'encoding': 'XML_BASE64_GZIP'})
+
+    labeltable = nb.gifti.GiftiLabelTable()
+
+    for i in range(Q):
+        E = nb.gifti.gifti.GiftiLabel()
+        E.key = data[i]
+        E.label = labelNames[data[i]-1]
+        E.red = labelRGBA[data[i]-1, 0]
+        E.green = labelRGBA[data[i]-1, 1]
+        E.blue = labelRGBA[data[i]-1, 2]
+        E.alpha = labelRGBA[data[i]-1, 3]
+        labeltable.labels.append(E)
+
+    d = nb.gifti.GiftiDataArray(data, intent='NIFTI_INTENT_LABEL',datatype='NIFTI_TYPE_INT32')
+    S = nb.gifti.GiftiImage(meta=C, darrays=[d], labeltable=labeltable)
 
     return S
 
